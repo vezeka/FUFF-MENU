@@ -1,0 +1,115 @@
+#!/bin/bash
+
+# Vérifiez si ffuf est installé
+if ! [ -x "$(which ffuf)" ]; then
+    echo "ffuf n'est pas installé. Installez-le et réessayez."
+    exit 1
+fi
+
+# Liste des wordlists
+declare -A WORDLISTS
+WORDLISTS=(
+    ["LFI.txt"]="/usr/share/wordlists/Custom/LFI.txt"
+    ["fuzz-Bo0oM.txt"]="/usr/share/wordlists/seclists/Fuzzing/fuzz-Bo0oM.txt"
+    ["urls-Drupal-7.20.txt"]="/usr/share/wordlists/seclists/Discovery/Web-Content/URLs/urls-Drupal-7.20.txt"
+    ["urls-joomla-3.0.3.txt"]="/usr/share/wordlists/seclists/Discovery/Web-Content/URLs/urls-joomla-3.0.3.txt"
+    ["urls-wordpress-3.3.1.txt"]="/usr/share/wordlists/seclists/Discovery/Web-Content/URLs/urls-wordpress-3.3.1.txt"
+    ["common.txt"]="/usr/share/wordlists/seclists/Discovery/Web-Content/common.txt"
+    ["raft-medium-directories.txt"]="/usr/share/wordlists/seclists/Discovery/Web-Content/raft-medium-directories.txt"
+    ["apache.txt"]="/usr/share/wordlists/seclists/Discovery/Web-Content/apache.txt"
+    ["RobotsDisallowed-Top1000.txt"]="/usr/share/wordlists/seclists/Discovery/Web-Content/RobotsDisallowed-Top1000.txt"
+    ["nginx.txt"]="/usr/share/wordlists/seclists/Discovery/Web-Content/nginx.txt"
+    ["big.txt"]="/usr/share/wordlists/seclists/Discovery/Web-Content/big.txt" 
+)
+
+
+# Fichier par défaut pour les subdomains
+SUBDOMAINS_FILE="all_subdomains.txt"
+# URL unique
+SINGLE_URL=""
+
+# Fonction pour extraire le domaine de base
+extract_base_domain() {
+    local FULL_DOMAIN=$1
+
+    # Supprimez le protocole (http:// ou https://)
+    local CLEANED_DOMAIN=${FULL_DOMAIN#http://}
+    CLEANED_DOMAIN=${CLEANED_DOMAIN#https://}
+
+    # Supprimez les éventuels chemins après le nom de domaine
+    CLEANED_DOMAIN=${CLEANED_DOMAIN%%/*}
+
+    # Retournez seulement la partie pertinente du domaine
+    echo $CLEANED_DOMAIN | rev | cut -d'.' -f1-2 | rev
+}
+
+# Utilisation de getopts pour gérer les options
+while getopts ":f:" opt; do
+  case $opt in
+    f)
+      SUBDOMAINS_FILE="$OPTARG"
+      ;;
+    \?)
+      echo "Option invalide: -$OPTARG" >&2
+      exit 1
+      ;;
+    :)
+      echo "Option -$OPTARG requiert un argument." >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Supprimez les options déjà traitées
+shift $((OPTIND-1))
+
+# Si une URL est passée après les options, utilisez-la
+if [ "$#" -gt 0 ]; then
+    SINGLE_URL="$1"
+fi
+
+# Affichez les wordlists disponibles et demandez à l'utilisateur d'en sélectionner une
+echo "Sélectionnez une wordlist :"
+i=1
+for key in "${!WORDLISTS[@]}"; do
+    echo "$i. $key"
+    ((i++))
+done
+
+read -p "Entrez le numéro de la wordlist que vous souhaitez utiliser: " selection
+WORDLIST="${WORDLISTS[$(echo $(for key in "${!WORDLISTS[@]}"; do echo "$key"; done) | cut -d' ' -f$selection)]}"
+
+# Créez le répertoire cible s'il n'existe pas
+mkdir -p $HOME/Recon/Target
+
+fuzz_url() {
+    local url=$1
+    BASE_DOMAIN=$(extract_base_domain $url)
+    OUTPUT_FILE="$HOME/Recon/Target/${BASE_DOMAIN}_hidden_directories.txt"
+    TEMP_FILE="${BASE_DOMAIN}_hidden_directories_temp.txt"
+
+    # Utilisez ffuf pour trouver les répertoires cachés avec l'option -c pour activer la sortie colorée
+    ffuf -w $WORDLIST -u "$url/FUZZ" -mc 200,300,403 -o "$TEMP_FILE" -of csv -c
+
+    # Filtrage des résultats et mise en forme avec des couleurs
+    grep ",200," "$TEMP_FILE" | cut -d',' -f2 >> "$OUTPUT_FILE"
+
+    # Let's print the contents of the output file for inspection
+    echo "Results found for $BASE_DOMAIN:"
+    cat "$OUTPUT_FILE"
+
+    # Suppression du fichier temporaire
+    rm -f "$TEMP_FILE"
+}
+
+# Si une URL unique est fournie, fuzz cette URL
+if [ ! -z "$SINGLE_URL" ]; then
+    fuzz_url "$SINGLE_URL"
+else
+    # Parcourir le fichier des subdomains ou le fichier spécifié avec l'option -f
+    while IFS= read -r subdomain; do
+        fuzz_url "$subdomain"
+    done < "$SUBDOMAINS_FILE"
+fi
+
+echo "La recherche est terminée. Vérifiez les fichiers dans $HOME/Recon/Target/ pour les résultats."
